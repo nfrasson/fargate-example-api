@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  web:
+    depends_on:
+      - postgres
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=local
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=local_user
+      - POSTGRES_PASSWORD=local_password
+      - JWT_SECRET=mysecretsecret
+    deploy:
+      resources:
+        limits:
+          cpus: "0.256"
+          memory: 512M
+
+  postgres:
+    image: postgres:latest
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=lambda_api_example
+      - POSTGRES_USER=local_user
+      - POSTGRES_PASSWORD=local_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

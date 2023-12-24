@@ -1,0 +1,61 @@
+name: Deploy SAM Application
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Setup AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: sa-east-1
+
+      - name: Deploy ECR Resources
+        run: |
+          cd cloudformation
+          sam deploy --template-file ecr-resources.yaml --config-file ecr-samconfig.toml --no-fail-on-empty-changeset --parameter-overrides Stage=dev
+
+      - name: Build and push Image
+        run: |
+          export AWS_DEFAULT_REGION=sa-east-1
+          export AWS_ACCOUNT_ID=${{ secrets.AWS_ACCOUNT_ID }}
+          IMAGE_TAG="fargate-backend-ecr-dev:$GITHUB_SHA"
+          ECR_REPO_URL="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_TAG"
+          aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+          docker build -t $IMAGE_TAG .
+          docker tag $IMAGE_TAG $ECR_REPO_URL
+          docker push $ECR_REPO_URL
+
+      - name: Deploy VPC Resources
+        run: |
+          cd cloudformation
+          sam deploy --template-file vpc-resources.yaml --config-file vpc-samconfig.toml --no-fail-on-empty-changeset --parameter-overrides Stage=dev
+
+      - name: Deploy ECS Resources
+        run: |
+          export DATADOG_API_KEY=${{ secrets.DATADOG_API_KEY }}
+          cd cloudformation
+          sam deploy --template-file ecs-resources.yaml --no-fail-on-empty-changeset --config-file ecs-samconfig.toml --parameter-overrides VpcStackName=fargate-backend-vpc-dev ECRImageURL=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/fargate-backend-ecr-dev:$GITHUB_SHA Stage=dev DatadogAPIKey=$DATADOG_API_KEY

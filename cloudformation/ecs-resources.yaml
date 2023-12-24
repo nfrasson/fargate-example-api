@@ -1,0 +1,357 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "AWS CloudFormation template to create an ECS necessary infrastructure"
+
+Resources:
+  #IAM Roles
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  ECSTaskExecutionRolePolicyCloudWatch:
+    Type: AWS::IAM::Policy
+    Properties:
+      Roles: [!Ref ECSTaskExecutionRole]
+      PolicyName: CloudWatchLogsAccess
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !GetAtt CloudWatchLogsGroup.Arn
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ECSTaskPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:ListClusters
+                  - ecs:ListContainerInstances
+                  - ecs:DescribeContainerInstances
+                Resource: "*"
+
+  # CloudWatch Logs
+  CloudWatchLogsGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: !Sub "${AWS::StackName}-logs"
+
+  # Load Balancer
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "fargate-${Stage}-lb"
+      Subnets:
+        - Fn::ImportValue: !Sub "${VpcStackName}-PublicSubnetA"
+        - Fn::ImportValue: !Sub "${VpcStackName}-PublicSubnetB"
+      SecurityGroups:
+        - Fn::ImportValue: !Sub "${VpcStackName}-LoadBalancerSecG"
+
+  LoadBalancerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: LoadBalancer
+    Properties:
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStackName}-VPC"
+      Port: 80
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckPath: /healthcheck
+      HealthCheckIntervalSeconds: 30
+      Matcher:
+        HttpCode: 204
+
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: LoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref LoadBalancerTargetGroup
+
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "fargate-${Stage}"
+
+  # ECS Task Definition
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Cpu: 512
+      Memory: 1024
+      NetworkMode: awsvpc
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: X86_64
+      RequiresCompatibilities:
+        - FARGATE
+      TaskRoleArn: !Ref ECSTaskRole
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole
+      ContainerDefinitions:
+        - Name: !Sub "fargate-${Stage}-webcontainer"
+          Image: !Ref ECRImageURL
+          LogConfiguration:
+            LogDriver: "awslogs"
+            Options:
+              awslogs-group: !Ref CloudWatchLogsGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: "ecs"
+          PortMappings:
+            - ContainerPort: 3000
+          Environment:
+            - Name: NODE_ENV
+              Value: "production"
+            - Name: POSTGRES_HOST
+              Value:
+                Fn::GetAtt: [RDSFargateProxy, Endpoint]
+            - Name: POSTGRES_USER
+              Value: "mydbuser"
+            - Name: POSTGRES_PASSWORD
+              Value: "mydbpassword"
+            - Name: JWT_SECRET
+              Value: mysecretsecret
+        - Name: !Sub "fargate-${Stage}-datadogagent"
+          Image: public.ecr.aws/datadog/agent:latest
+          Environment:
+            - Name: DD_API_KEY
+              Value: !Ref DatadogAPIKey
+            - Name: DD_APM_ENABLED
+              Value: "true"
+            - Name: ECS_FARGATE
+              Value: "true"
+            - Name: DD_LOGS_ENABLED
+              Value: "true"
+          LogConfiguration:
+            LogDriver: "awslogs"
+            Options:
+              awslogs-group: !Ref CloudWatchLogsGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: "ecs"
+
+  # ECS Service not exposed to the internet
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: LoadBalancerListener
+    Properties:
+      ServiceName: !Sub "fargate-${Stage}-service"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ECSTaskDefinition
+      DesiredCount: 3
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - Fn::ImportValue: !Sub "${VpcStackName}-PublicSubnetA"
+            - Fn::ImportValue: !Sub "${VpcStackName}-PublicSubnetB"
+          SecurityGroups:
+            - Fn::ImportValue: !Sub "${VpcStackName}-ECSTaskSecG"
+          AssignPublicIp: "ENABLED"
+      LoadBalancers:
+        - TargetGroupArn: !Ref LoadBalancerTargetGroup
+          ContainerName: !Sub "fargate-${Stage}-webcontainer"
+          ContainerPort: 3000
+
+  # CloudFront Distribution
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn: LoadBalancerListener
+    Properties:
+      DistributionConfig:
+        Origins:
+          - DomainName: !GetAtt LoadBalancer.DNSName
+            Id: !Sub ${AWS::StackName}-Origin
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+        Enabled: true
+        DefaultCacheBehavior:
+          TargetOriginId: !Sub ${AWS::StackName}-Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - DELETE
+            - PATCH
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          ForwardedValues:
+            QueryString: true
+            QueryStringCacheKeys:
+              - "*"
+            Cookies:
+              Forward: none
+            Headers:
+              - Authorization
+          MinTTL: 0
+          DefaultTTL: 0
+          MaxTTL: 0
+        CacheBehaviors:
+          - PathPattern: "/courses"
+            TargetOriginId: !Sub ${AWS::StackName}-Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - POST
+              - DELETE
+              - PATCH
+            ForwardedValues:
+              QueryString: true
+              Cookies:
+                Forward: none
+            MinTTL: 604800
+            DefaultTTL: 604800
+            MaxTTL: 604800
+        PriceClass: PriceClass_All
+      Tags:
+        - Key: "Description"
+          Value: !Sub "Fargate ${Stage} CloudFront Distribution"
+
+  # RDS Resources
+  RDSSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: "RDSFargateProxySecret"
+      Description: "Secret for RDS Proxy"
+      SecretString:
+        Fn::Sub: '{"username": "mydbuser", "password": "mydbpassword"}'
+
+  RDSFargateInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: fargate_api_example
+      AllocatedStorage: 5
+      DBInstanceClass: db.t3.micro
+      Engine: postgres
+      MasterUsername: mydbuser
+      MasterUserPassword: mydbpassword
+      VPCSecurityGroups:
+        - Fn::ImportValue: !Sub "${VpcStackName}-RDSSecurityGroup"
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      PubliclyAccessible: true
+
+  DBSubnetGroup:
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
+      DBSubnetGroupDescription: "Subnet group for RDS (Fargate)"
+      SubnetIds:
+        - Fn::ImportValue: !Sub "${VpcStackName}-PublicSubnetA"
+        - Fn::ImportValue: !Sub "${VpcStackName}-PublicSubnetB"
+
+  RDSFargateProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AccessSecretsManager
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - Ref: RDSSecret
+
+  RDSFargateProxy:
+    Type: AWS::RDS::DBProxy
+    Properties:
+      DBProxyName: db-fargate-proxy
+      EngineFamily: POSTGRESQL
+      RoleArn:
+        Fn::GetAtt: RDSFargateProxyRole.Arn
+      Auth:
+        - AuthScheme: SECRETS
+          SecretArn:
+            Ref: RDSSecret
+          IAMAuth: DISABLED
+      VpcSecurityGroupIds:
+        - Fn::ImportValue: !Sub "${VpcStackName}-RDSSecurityGroup"
+      VpcSubnetIds:
+        - Fn::ImportValue: !Sub "${VpcStackName}-PublicSubnetA"
+        - Fn::ImportValue: !Sub "${VpcStackName}-PublicSubnetB"
+      RequireTLS: true
+
+  ProxyFargateTargetGroup:
+    Type: AWS::RDS::DBProxyTargetGroup
+    Properties:
+      DBProxyName: db-fargate-proxy
+      TargetGroupName: default
+      DBInstanceIdentifiers:
+        - Ref: RDSFargateInstance
+    DependsOn: RDSFargateProxy
+
+Parameters:
+  VpcStackName:
+    Description: The name of the stack of vpc-resources
+    Type: String
+  DatadogAPIKey:
+    Description: Datadog API Key
+    Type: String
+  ECRImageURL:
+    Description: ECR Image URL
+    Type: String
+  Stage:
+    Description: Development stage identifier
+    Default: dev
+    Type: String
+    AllowedValues:
+      - dev
+      - hml
+      - app
+
+Outputs:
+  LoadBalancerDNS:
+    Description: The DNS name of the Load Balancer
+    Value: !GetAtt LoadBalancer.DNSName
+    Export:
+      Name: LoadBalancerDNS
+  CloudFrontDomain:
+    Description: CloudFront Distribution Domain Name
+    Value: !GetAtt CloudFrontDistribution.DomainName
+    Export:
+      Name: CloudFrontDomain
