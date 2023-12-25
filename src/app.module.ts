@@ -1,8 +1,9 @@
+import fs from "fs";
 import { Module } from "@nestjs/common";
-import { TypeOrmModule } from "@nestjs/typeorm";
-import { DefaultController } from "./default.controller";
 import { User } from "./User/user.entity";
+import { TypeOrmModule } from "@nestjs/typeorm";
 import { UserModule } from "./User/user.module";
+import { DefaultController } from "./default.controller";
 
 @Module({
   imports: [
@@ -14,7 +15,14 @@ import { UserModule } from "./User/user.module";
       password: process.env.POSTGRES_PASSWORD,
       database: "lambda_api_example",
       entities: [User],
-      ssl: !(process.env.NODE_ENV === "local"),
+      ssl:
+        (process.env.NODE_ENV === "production" && {
+          rejectUnauthorized: true,
+          ca: fs
+            .readFileSync(`${__dirname}/assets/rds-ca-2019-root.pem`)
+            .toString(),
+        }) ||
+        false,
       logging: false,
       synchronize: true,
     }),
