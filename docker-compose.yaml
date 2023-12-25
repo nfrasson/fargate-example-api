@@ -26,7 +26,7 @@ services:
     ports:
       - "5432:5432"
     environment:
-      - POSTGRES_DB=lambda_api_example
+      - POSTGRES_DB=fargate_api_example
       - POSTGRES_USER=local_user
       - POSTGRES_PASSWORD=local_password
     volumes:

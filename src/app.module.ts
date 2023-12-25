@@ -13,7 +13,7 @@ import { DefaultController } from "./default.controller";
       host: process.env.POSTGRES_HOST,
       username: process.env.POSTGRES_USER,
       password: process.env.POSTGRES_PASSWORD,
-      database: "lambda_api_example",
+      database: "fargate_api_example",
       entities: [User],
       ssl:
         (process.env.NODE_ENV === "production" && {

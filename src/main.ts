@@ -1,8 +1,7 @@
 import helmet from "@fastify/helmet";
-import { NestFactory } from "@nestjs/core";
 import { AppModule } from "./app.module";
+import { NestFactory } from "@nestjs/core";
 import { ValidationPipe } from "@nestjs/common";
-import fastifyCsrf from "@fastify/csrf-protection";
 import {
   FastifyAdapter,
   NestFastifyApplication,
@@ -14,9 +13,8 @@ async function bootstrap() {
     new FastifyAdapter({ logger: { level: "warn" } })
   );
 
-  app.register(helmet);
   app.enableCors();
-  await app.register(fastifyCsrf);
+  app.register(helmet);
   app.useGlobalPipes(new ValidationPipe({ transform: true }));
 
   await app.listen(3000, "0.0.0.0");
