@@ -5,6 +5,15 @@ on:
     branches:
       - main
 
+env:
+  STAGE: dev
+  AWS_REGION: sa-east-1
+  ECR_REPO_NAME: fargate-backend-ecr-dev
+  DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+
+permissions:
+  contents: read
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
@@ -17,6 +26,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+
+      - name: Cache Node.js modules
+        uses: actions/cache@v2
+        with:
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          path: |
+            node_modules
+            */*/node_modules
 
       - name: Install Node.js dependencies
         run: npm ci
@@ -31,31 +48,34 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: sa-east-1
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Deploy ECR Resources
         run: |
           cd cloudformation
-          sam deploy --template-file ecr-resources.yaml --config-file ecr-samconfig.toml --no-fail-on-empty-changeset --parameter-overrides Stage=dev
+          sam deploy --template-file ecr-resources.yaml --config-file ecr-samconfig.toml --no-fail-on-empty-changeset --parameter-overrides Stage=$STAGE
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
 
       - name: Build and push Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          export AWS_DEFAULT_REGION=sa-east-1
-          export AWS_ACCOUNT_ID=${{ secrets.AWS_ACCOUNT_ID }}
-          IMAGE_TAG="fargate-backend-ecr-dev:$GITHUB_SHA"
-          ECR_REPO_URL="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_TAG"
-          aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
-          docker build -t $IMAGE_TAG .
-          docker tag $IMAGE_TAG $ECR_REPO_URL
-          docker push $ECR_REPO_URL
+          docker build -t $ECR_REGISTRY/$ECR_REPO_NAME:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPO_NAME:$IMAGE_TAG
 
       - name: Deploy VPC Resources
         run: |
           cd cloudformation
-          sam deploy --template-file vpc-resources.yaml --config-file vpc-samconfig.toml --no-fail-on-empty-changeset --parameter-overrides Stage=dev
+          sam deploy --template-file vpc-resources.yaml --config-file vpc-samconfig.toml --no-fail-on-empty-changeset --parameter-overrides Stage=$STAGE
 
       - name: Deploy ECS Resources
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          export DATADOG_API_KEY=${{ secrets.DATADOG_API_KEY }}
           cd cloudformation
-          sam deploy --template-file ecs-resources.yaml --no-fail-on-empty-changeset --config-file ecs-samconfig.toml --parameter-overrides VpcStackName=fargate-backend-vpc-dev ECRImageURL=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/fargate-backend-ecr-dev:$GITHUB_SHA Stage=dev DatadogAPIKey=$DATADOG_API_KEY
+          sam deploy --template-file ecs-resources.yaml --no-fail-on-empty-changeset --config-file ecs-samconfig.toml --parameter-overrides VpcStackName=fargate-backend-vpc-$STAGE ECRImageURL=$ECR_REGISTRY/$ECR_REPO_NAME:$IMAGE_TAG Stage=$STAGE DatadogAPIKey=$DATADOG_API_KEY
