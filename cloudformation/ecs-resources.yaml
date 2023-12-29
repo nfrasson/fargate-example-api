@@ -182,69 +182,6 @@ Resources:
           ContainerName: !Sub "fargate-${Stage}-webcontainer"
           ContainerPort: 3000
 
-  # CloudFront Distribution
-  CloudFrontDistribution:
-    Type: AWS::CloudFront::Distribution
-    DependsOn: LoadBalancerListener
-    Properties:
-      DistributionConfig:
-        Origins:
-          - DomainName: !GetAtt LoadBalancer.DNSName
-            Id: !Sub ${AWS::StackName}-Origin
-            CustomOriginConfig:
-              HTTPPort: 80
-              OriginProtocolPolicy: http-only
-        Enabled: true
-        DefaultCacheBehavior:
-          TargetOriginId: !Sub ${AWS::StackName}-Origin
-          ViewerProtocolPolicy: redirect-to-https
-          AllowedMethods:
-            - GET
-            - HEAD
-            - OPTIONS
-            - PUT
-            - POST
-            - DELETE
-            - PATCH
-          CachedMethods:
-            - GET
-            - HEAD
-            - OPTIONS
-          ForwardedValues:
-            QueryString: true
-            QueryStringCacheKeys:
-              - "*"
-            Cookies:
-              Forward: none
-            Headers:
-              - Authorization
-          MinTTL: 0
-          DefaultTTL: 0
-          MaxTTL: 0
-        CacheBehaviors:
-          - PathPattern: "/courses"
-            TargetOriginId: !Sub ${AWS::StackName}-Origin
-            ViewerProtocolPolicy: redirect-to-https
-            AllowedMethods:
-              - GET
-              - HEAD
-              - OPTIONS
-              - PUT
-              - POST
-              - DELETE
-              - PATCH
-            ForwardedValues:
-              QueryString: true
-              Cookies:
-                Forward: none
-            MinTTL: 604800
-            DefaultTTL: 604800
-            MaxTTL: 604800
-        PriceClass: PriceClass_All
-      Tags:
-        - Key: "Description"
-          Value: !Sub "Fargate ${Stage} CloudFront Distribution"
-
   # RDS Resources
   RDSSecret:
     Type: AWS::SecretsManager::Secret
@@ -350,8 +287,3 @@ Outputs:
     Value: !GetAtt LoadBalancer.DNSName
     Export:
       Name: LoadBalancerDNS
-  CloudFrontDomain:
-    Description: CloudFront Distribution Domain Name
-    Value: !GetAtt CloudFrontDistribution.DomainName
-    Export:
-      Name: CloudFrontDomain
